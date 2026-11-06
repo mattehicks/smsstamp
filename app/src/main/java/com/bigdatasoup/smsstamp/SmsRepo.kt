@@ -35,7 +35,6 @@ object Fmt {
         val dir = if (m.outgoing) "SENT" else "RECEIVED"
         val sb = StringBuilder("$dir ${full(m.date)}")
         if (!m.outgoing && m.dateSent > 0 && Math.abs(m.dateSent - m.date) > 1000) sb.append("\nsender clock ${full(m.dateSent)}")
-        sb.append("\nepoch ${m.date}")
         return sb.toString()
     }
 }

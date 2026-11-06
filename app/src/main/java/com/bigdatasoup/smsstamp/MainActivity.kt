@@ -1,15 +1,26 @@
 package com.bigdatasoup.smsstamp
 
 import android.Manifest
+import android.app.role.RoleManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.drawable.ColorDrawable
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.Telephony
 import android.view.LayoutInflater
+import android.view.Menu
+import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.view.ActionMode
 import androidx.core.content.ContextCompat
 import androidx.core.widget.doAfterTextChanged
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -17,11 +28,27 @@ import androidx.recyclerview.widget.RecyclerView
 import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
-    private val perms = arrayOf(Manifest.permission.READ_SMS, Manifest.permission.READ_CONTACTS)
+    private val perms = if (Build.VERSION.SDK_INT >= 33) arrayOf(Manifest.permission.READ_SMS, Manifest.permission.READ_CONTACTS, Manifest.permission.POST_NOTIFICATIONS)
+        else arrayOf(Manifest.permission.READ_SMS, Manifest.permission.READ_CONTACTS)
     private lateinit var repo: SmsRepo
     private var all: List<Thread> = emptyList()
     private val adapter = ThreadAdapter()
     private val exec = Executors.newSingleThreadExecutor()
+    private val selected = HashSet<Long>()
+    private var mode: ActionMode? = null
+    private val roleLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        if (Sms.isDefault(this)) confirmDelete()
+        else Toast.makeText(this, "SMS Stamp must be the default messaging app to delete", Toast.LENGTH_LONG).show()
+    }
+    private val modeCb = object : ActionMode.Callback {
+        override fun onCreateActionMode(m: ActionMode, menu: Menu): Boolean { m.menuInflater.inflate(R.menu.menu_select, menu); return true }
+        override fun onPrepareActionMode(m: ActionMode, menu: Menu) = false
+        override fun onActionItemClicked(m: ActionMode, item: MenuItem): Boolean {
+            if (item.itemId == R.id.action_delete) { confirmDelete(); return true }
+            return false
+        }
+        override fun onDestroyActionMode(m: ActionMode) { mode = null; selected.clear(); adapter.notifyDataSetChanged() }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -54,6 +81,33 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun toggle(id: Long) {
+        if (!selected.remove(id)) selected.add(id)
+        if (selected.isEmpty()) { mode?.finish(); return }
+        mode?.title = "${selected.size} selected"
+        adapter.notifyDataSetChanged()
+    }
+
+    private fun confirmDelete() {
+        if (selected.isEmpty()) return
+        if (!Sms.isDefault(this)) {
+            roleLauncher.launch(if (Build.VERSION.SDK_INT >= 29) getSystemService(RoleManager::class.java).createRequestRoleIntent(RoleManager.ROLE_SMS)
+                else Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, packageName))
+            return
+        }
+        val ids = selected.toList()
+        val msgs = all.filter { it.threadId in ids }.sumOf { it.count }
+        AlertDialog.Builder(this).setTitle("Delete ${ids.size} conversation(s)?")
+            .setMessage("$msgs messages will be permanently deleted from this phone. This cannot be undone.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete") { _, _ ->
+                exec.execute {
+                    for (t in ids) contentResolver.delete(Uri.parse("content://mms-sms/conversations/$t"), null, null)
+                    runOnUiThread { mode?.finish(); Toast.makeText(this, "Deleted ${ids.size} conversation(s)", Toast.LENGTH_SHORT).show(); load() }
+                }
+            }.show()
+    }
+
     private fun filter(q: String) {
         val s = q.trim().lowercase()
         adapter.items = if (s.isEmpty()) all else all.filter { it.display.lowercase().contains(s) || it.address.lowercase().contains(s) }
@@ -74,9 +128,15 @@ class MainActivity : AppCompatActivity() {
             h.number.text = if (t.name != null) "${t.address} · ${t.count} msgs" else "${t.count} msgs"
             h.snippet.text = t.snippet
             h.date.text = Fmt.short(t.date)
+            h.itemView.foreground = if (t.threadId in selected) ColorDrawable(0x551E6FD9) else null
             h.itemView.setOnClickListener {
-                startActivity(Intent(this@MainActivity, ConversationActivity::class.java)
+                if (mode != null) toggle(t.threadId)
+                else startActivity(Intent(this@MainActivity, ConversationActivity::class.java)
                     .putExtra("thread", t.threadId).putExtra("name", t.display).putExtra("address", t.address))
+            }
+            h.itemView.setOnLongClickListener {
+                if (mode == null) mode = startSupportActionMode(modeCb)
+                toggle(t.threadId); true
             }
         }
     }

@@ -2,5 +2,6 @@
     <style name="Theme.SmsStamp" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="colorPrimary">#1E6FD9</item>
         <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="windowActionModeOverlay">true</item>
     </style>
 </resources>

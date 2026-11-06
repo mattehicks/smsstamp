@@ -1,4 +1,6 @@
 <menu xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto">
+    <item android:id="@+id/action_search" android:title="Search" android:icon="@android:drawable/ic_menu_search"
+        app:iconTint="?attr/colorOnSurface" app:showAsAction="always" />
     <item android:id="@+id/action_export_txt" android:title="Export TXT" app:showAsAction="never" />
     <item android:id="@+id/action_export_csv" android:title="Export CSV" app:showAsAction="never" />
 </menu>
