@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical">
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/toolbar" android:layout_width="match_parent" android:layout_height="?attr/actionBarSize" />
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal"
+        android:paddingStart="8dp" android:paddingEnd="8dp" android:gravity="center_vertical">
+        <EditText android:id="@+id/search" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+            android:hint="Search text in conversation" android:inputType="text" android:singleLine="true" />
+        <com.google.android.material.materialswitch.MaterialSwitch android:id="@+id/stamps"
+            android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Stamps" android:layout_marginStart="8dp" />
+    </LinearLayout>
+    <TextView android:id="@+id/count" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:paddingStart="12dp" android:paddingEnd="12dp" android:paddingBottom="4dp" android:textSize="12sp" android:textColor="@color/stamp" />
+    <androidx.recyclerview.widget.RecyclerView android:id="@+id/list"
+        android:layout_width="match_parent" android:layout_height="match_parent" android:clipToPadding="false" android:paddingBottom="12dp" />
+</LinearLayout>
