@@ -43,6 +43,8 @@
             </intent-filter>
         </receiver>
         <receiver android:name=".SentReceiver" android:exported="false" />
+        <receiver android:name=".MmsDownloadedReceiver" android:exported="false" />
+        <receiver android:name=".MmsSentReceiver" android:exported="false" />
         <service android:name=".HeadlessSmsService" android:exported="true"
             android:permission="android.permission.SEND_RESPOND_VIA_MESSAGE">
             <intent-filter>

@@ -6,6 +6,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.app.role.RoleManager
 import android.content.BroadcastReceiver
 import android.content.ContentValues
 import android.content.Context
@@ -19,7 +20,11 @@ import android.telephony.SmsManager
 import androidx.core.app.NotificationCompat
 
 object Sms {
-    fun isDefault(ctx: Context) = Telephony.Sms.getDefaultSmsPackage(ctx) == ctx.packageName
+    fun isDefault(ctx: Context) = if (Build.VERSION.SDK_INT >= 29) ctx.getSystemService(RoleManager::class.java).isRoleHeld(RoleManager.ROLE_SMS)
+        else Telephony.Sms.getDefaultSmsPackage(ctx) == ctx.packageName
+
+    @Suppress("DEPRECATION")
+    fun manager(ctx: Context): SmsManager = if (Build.VERSION.SDK_INT >= 31) ctx.getSystemService(SmsManager::class.java) else SmsManager.getDefault()
 
     fun threadOf(ctx: Context, uri: Uri?): Long {
         if (uri == null) return -1
@@ -33,8 +38,7 @@ object Sms {
             put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_OUTBOX)
         }
         val uri = ctx.contentResolver.insert(Telephony.Sms.Outbox.CONTENT_URI, v) ?: return
-        @Suppress("DEPRECATION")
-        val sm = if (Build.VERSION.SDK_INT >= 31) ctx.getSystemService(SmsManager::class.java) else SmsManager.getDefault()
+        val sm = manager(ctx)
         val parts = sm.divideMessage(body)
         val pi = PendingIntent.getBroadcast(ctx, 0, Intent(ctx, SentReceiver::class.java).setData(uri),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
@@ -83,11 +87,11 @@ class SentReceiver : BroadcastReceiver() {
     }
 }
 
-/** Stores the MMS notification (content location etc.) as a not-yet-downloaded inbox MMS. Content download is not implemented. */
+/** Stores the MMS notification as a not-yet-downloaded inbox MMS, then starts the download (which replaces it). */
 class MmsReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
         val pdu = intent.getByteArrayExtra("data") ?: return
-        val n = MmsPdu.parse(pdu)
+        val n = PduReader(pdu).headers()
         if (n.type != 0x82 || n.location == null) return
         val tid = if (n.from.isNotEmpty()) Telephony.Threads.getOrCreateThreadId(ctx, n.from) else -1L
         val v = ContentValues().apply {
@@ -101,44 +105,7 @@ class MmsReceiver : BroadcastReceiver() {
         if (n.from.isNotEmpty()) ctx.contentResolver.insert(Uri.parse("content://mms/${uri.lastPathSegment}/addr"), ContentValues().apply {
             put(Telephony.Mms.Addr.ADDRESS, n.from); put(Telephony.Mms.Addr.TYPE, 0x89); put(Telephony.Mms.Addr.CHARSET, 106)
         })
-        Sms.notify(ctx, n.from, "Picture/group message received (not downloaded)", tid)
-    }
-}
-
-object MmsPdu {
-    class Ind { var type = 0; var trId: String? = null; var from = ""; var location: String? = null; var size = 0L; var expiry = 0L }
-
-    fun parse(b: ByteArray): Ind {
-        val r = Ind(); var i = 0
-        fun u(k: Int) = b[k].toInt() and 0xFF
-        fun text(): String { val s = i; while (i < b.size && b[i].toInt() != 0) i++; val t = String(b, s, i - s, Charsets.UTF_8); i++; return t.removePrefix("\u007f") }
-        fun uintvar(): Int { var v = 0; while (i < b.size) { val x = u(i++); v = (v shl 7) or (x and 0x7F); if (x and 0x80 == 0) break }; return v }
-        fun len(): Int { val v = u(i++); return if (v == 31) uintvar() else v }
-        fun longInt(): Long { val n = u(i++); var v = 0L; repeat(n) { v = (v shl 8) or u(i++).toLong() }; return v }
-        fun encString(): String {
-            if (u(i) > 31) return text()
-            val l = len(); val end = i + l
-            if (u(i) >= 128) i++ else longInt()
-            val t = text(); i = end; return t
-        }
-        fun skip() { val v = u(i); when { v >= 128 -> i++; v <= 31 -> { val l = len(); i += l }; else -> text() } }
-        try {
-            while (i < b.size) {
-                val f = u(i)
-                if (f < 128) { text(); skip(); continue }
-                i++
-                when (f) {
-                    0x8C -> r.type = u(i++)
-                    0x98 -> r.trId = text()
-                    0x83 -> r.location = text()
-                    0x8E -> r.size = longInt()
-                    0x88 -> { val l = len(); val end = i + l; val tok = u(i++); val v = longInt(); r.expiry = if (tok == 0x80) v else System.currentTimeMillis() / 1000 + v; i = end }
-                    0x89 -> { val l = len(); val end = i + l; if (u(i) == 0x80) { i++; r.from = encString().substringBefore("/TYPE=") }; i = end }
-                    else -> skip()
-                }
-            }
-        } catch (e: IndexOutOfBoundsException) { }
-        return r
+        Mms.download(ctx, n.location!!, n.trId, uri)
     }
 }
 

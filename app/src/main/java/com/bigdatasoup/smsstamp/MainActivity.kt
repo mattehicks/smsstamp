@@ -4,10 +4,13 @@ import android.Manifest
 import android.app.role.RoleManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.database.ContentObserver
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Telephony
 import android.view.LayoutInflater
 import android.view.Menu
@@ -35,6 +38,7 @@ class MainActivity : AppCompatActivity() {
     private val adapter = ThreadAdapter()
     private val exec = Executors.newSingleThreadExecutor()
     private val selected = HashSet<Long>()
+    private var contactsOnly = false
     private var mode: ActionMode? = null
     private val roleLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         if (Sms.isDefault(this)) confirmDelete()
@@ -59,6 +63,15 @@ class MainActivity : AppCompatActivity() {
         list.layoutManager = LinearLayoutManager(this)
         list.adapter = adapter
         findViewById<EditText>(R.id.search).doAfterTextChanged { filter(it?.toString() ?: "") }
+        val prefs = getSharedPreferences("p", MODE_PRIVATE)
+        contactsOnly = prefs.getBoolean("contactsOnly", false)
+        val co = findViewById<TextView>(R.id.contacts_only)
+        co.alpha = if (contactsOnly) 1f else 0.4f
+        co.setOnClickListener {
+            contactsOnly = !contactsOnly; co.alpha = if (contactsOnly) 1f else 0.4f
+            prefs.edit().putBoolean("contactsOnly", contactsOnly).apply()
+            filter(findViewById<EditText>(R.id.search).text.toString())
+        }
         if (perms.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }) load()
         else requestPermissions(perms, 1)
     }
@@ -73,8 +86,17 @@ class MainActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.status).apply { text = s; visibility = if (s == null) View.GONE else View.VISIBLE }
     }
 
+    private val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+        override fun onChange(selfChange: Boolean) { handler.removeCallbacks(refresh); handler.postDelayed(refresh, 500) }
+    }
+    private val handler = Handler(Looper.getMainLooper())
+    private val refresh = Runnable { if (checkSelfPermission(Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED) load() }
+
+    override fun onStart() { super.onStart(); contentResolver.registerContentObserver(Uri.parse("content://mms-sms/"), true, observer) }
+    override fun onStop() { super.onStop(); contentResolver.unregisterContentObserver(observer) }
+
     private fun load() {
-        status("Loading…")
+        if (all.isEmpty()) status("Loading…")
         exec.execute {
             val t = repo.threads()
             runOnUiThread { all = t; status(if (t.isEmpty()) "No SMS found." else null); filter(findViewById<EditText>(R.id.search).text.toString()) }
@@ -110,7 +132,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun filter(q: String) {
         val s = q.trim().lowercase()
-        adapter.items = if (s.isEmpty()) all else all.filter { it.display.lowercase().contains(s) || it.address.lowercase().contains(s) }
+        val base = if (contactsOnly) all.filter { it.name != null } else all
+        adapter.items = if (s.isEmpty()) base else base.filter { it.display.lowercase().contains(s) || it.address.lowercase().contains(s) }
         adapter.notifyDataSetChanged()
     }
 

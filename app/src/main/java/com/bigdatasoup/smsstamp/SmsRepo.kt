@@ -9,9 +9,11 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 
+data class Part(val id: Long, val type: String, val name: String)
+
 data class Msg(
     val id: Long, val threadId: Long, val address: String, val body: String,
-    val date: Long, val dateSent: Long, val type: Int
+    val date: Long, val dateSent: Long, val type: Int, val media: List<Part> = emptyList()
 ) {
     val outgoing get() = type != Telephony.Sms.MESSAGE_TYPE_INBOX && type != Telephony.Sms.MESSAGE_TYPE_ALL
 }
@@ -74,11 +76,57 @@ class SmsRepo(private val ctx: Context) {
             counts[m.threadId] = (counts[m.threadId] ?: 0) + 1
             if (!seen.containsKey(m.threadId)) seen[m.threadId] = Thread(m.threadId, m.address, contactName(m.address), m.body, m.date, 0)
         }
-        return seen.values.map { it.copy(count = counts[it.threadId] ?: 0) }
+        ctx.contentResolver.query(Telephony.Mms.CONTENT_URI, arrayOf(Telephony.Mms._ID, Telephony.Mms.THREAD_ID, Telephony.Mms.DATE, Telephony.Mms.MESSAGE_BOX),
+            null, null, null)?.use { c ->
+            while (c.moveToNext()) {
+                val tid = c.getLong(1); val d = c.getLong(2) * 1000; val t = seen[tid]
+                counts[tid] = (counts[tid] ?: 0) + 1
+                if (t == null) { val a = mmsAddress(c.getLong(0), c.getInt(3)); seen[tid] = Thread(tid, a, contactName(a), PIC, d, 0) }
+                else if (d > t.date) seen[tid] = t.copy(snippet = PIC, date = d)
+            }
+        }
+        return seen.values.map { it.copy(count = counts[it.threadId] ?: 0) }.sortedByDescending { it.date }
     }
 
     fun messages(threadId: Long): List<Msg> =
-        read("${Telephony.Sms.THREAD_ID}=?", arrayOf(threadId.toString()), "${Telephony.Sms.DATE} ASC")
+        (read("${Telephony.Sms.THREAD_ID}=?", arrayOf(threadId.toString()), "${Telephony.Sms.DATE} ASC") + mms(threadId)).sortedBy { it.date }
+
+    private fun mms(threadId: Long): List<Msg> {
+        val out = ArrayList<Msg>()
+        ctx.contentResolver.query(Telephony.Mms.CONTENT_URI, arrayOf(Telephony.Mms._ID, Telephony.Mms.DATE, Telephony.Mms.DATE_SENT,
+            Telephony.Mms.MESSAGE_BOX, Telephony.Mms.MESSAGE_TYPE), "${Telephony.Mms.THREAD_ID}=?", arrayOf(threadId.toString()), null)?.use { c ->
+            while (c.moveToNext()) {
+                val id = c.getLong(0); val box = c.getInt(3)
+                val parts = if (c.getInt(4) == 0x82) emptyList() else mmsParts(id)
+                val text = parts.filter { it.first.type == "text/plain" }.joinToString("\n") { it.second ?: "" }
+                val body = if (c.getInt(4) == 0x82) "[Picture message — not downloaded]" else text
+                out.add(Msg(id, threadId, mmsAddress(id, box), body, c.getLong(1) * 1000, c.getLong(2) * 1000,
+                    if (box == Telephony.Mms.MESSAGE_BOX_INBOX) Telephony.Sms.MESSAGE_TYPE_INBOX else Telephony.Sms.MESSAGE_TYPE_SENT,
+                    parts.map { it.first }.filter { !it.type.startsWith("text/") && it.type != "application/smil" }))
+            }
+        }
+        return out
+    }
+
+    private fun mmsParts(mid: Long): List<Pair<Part, String?>> {
+        val out = ArrayList<Pair<Part, String?>>()
+        ctx.contentResolver.query(Uri.parse("content://mms/part"), arrayOf(Telephony.Mms.Part._ID, Telephony.Mms.Part.CONTENT_TYPE,
+            Telephony.Mms.Part.CONTENT_LOCATION, Telephony.Mms.Part.TEXT), "${Telephony.Mms.Part.MSG_ID}=?", arrayOf(mid.toString()), null)?.use { c ->
+            while (c.moveToNext()) out.add(Pair(Part(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "attachment"), c.getString(3)))
+        }
+        return out
+    }
+
+    private fun mmsAddress(mid: Long, box: Int): String {
+        val want = if (box == Telephony.Mms.MESSAGE_BOX_INBOX) 0x89 else 0x97
+        ctx.contentResolver.query(Uri.parse("content://mms/$mid/addr"), arrayOf(Telephony.Mms.Addr.ADDRESS, Telephony.Mms.Addr.TYPE),
+            null, null, null)?.use { c ->
+            while (c.moveToNext()) { val a = c.getString(0) ?: ""; if (c.getInt(1) == want && a != "insert-address-token") return a }
+        }
+        return ""
+    }
+
+    companion object { const val PIC = "\uD83D\uDCF7 Picture" }
 
     fun exportTxt(name: String, address: String, msgs: List<Msg>): String {
         val sb = StringBuilder()

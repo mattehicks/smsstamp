@@ -1,10 +1,22 @@
 package com.bigdatasoup.smsstamp
 
 import android.content.Intent
+import android.database.ContentObserver
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.ImageDecoder
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Telephony
+import android.util.LruCache
+import android.webkit.MimeTypeMap
+import android.widget.ImageView
+import androidx.activity.result.contract.ActivityResultContracts
+import java.io.ByteArrayOutputStream
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.style.BackgroundColorSpan
@@ -89,8 +101,82 @@ class ConversationActivity : AppCompatActivity() {
             compose.text.clear()
             exec.execute { Sms.send(this, address, text); reload(true) }
         }
+        findViewById<Button>(R.id.attach).setOnClickListener { pickImage.launch("image/*") }
         reload(false)
     }
+
+    private val pickImage = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@registerForActivityResult
+        val compose = findViewById<EditText>(R.id.compose)
+        val text = compose.text.toString(); compose.text.clear()
+        exec.execute {
+            try {
+                val parts = ArrayList<RawPart>()
+                parts.add(RawPart("image/jpeg", "image.jpg", jpeg(uri)))
+                if (text.isNotBlank()) parts.add(RawPart("text/plain", "text.txt", text.toByteArray(Charsets.UTF_8)))
+                Mms.send(this, address, parts); reload(true)
+            } catch (e: Exception) { runOnUiThread { Toast.makeText(this, "Could not send picture: ${e.message}", Toast.LENGTH_LONG).show() } }
+        }
+    }
+
+    private fun decode(uri: Uri, maxDim: Int): Bitmap? {
+        if (Build.VERSION.SDK_INT >= 28) return ImageDecoder.decodeBitmap(ImageDecoder.createSource(contentResolver, uri)) { d, info, _ ->
+            val s = maxOf(info.size.width, info.size.height).toFloat() / maxDim
+            if (s > 1) d.setTargetSize((info.size.width / s).toInt(), (info.size.height / s).toInt())
+            d.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+        }
+        val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, o) }
+        var s = 1; while (maxOf(o.outWidth, o.outHeight) / (s * 2) >= maxDim) s *= 2
+        return contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = s }) }
+    }
+
+    private fun jpeg(uri: Uri): ByteArray {
+        val bmp = decode(uri, 1280) ?: throw IllegalStateException("unreadable image")
+        var q = 85
+        while (true) {
+            val o = ByteArrayOutputStream(); bmp.compress(Bitmap.CompressFormat.JPEG, q, o)
+            if (o.size() <= 300_000 || q <= 35) return o.toByteArray()
+            q -= 10
+        }
+    }
+
+    private val thumbs = object : LruCache<Long, Bitmap>(24 * 1024 * 1024) { override fun sizeOf(k: Long, v: Bitmap) = v.byteCount }
+    private val imgExec = Executors.newFixedThreadPool(2)
+
+    private fun loadThumb(iv: ImageView, partId: Long) {
+        iv.tag = partId
+        thumbs.get(partId)?.let { iv.setImageBitmap(it); return }
+        iv.setImageDrawable(null)
+        imgExec.execute {
+            val b = try { decode(Uri.parse("content://mms/part/$partId"), 720) } catch (e: Exception) { null }
+            if (b != null) thumbs.put(partId, b)
+            runOnUiThread { if (iv.tag == partId) iv.setImageBitmap(b) }
+        }
+    }
+
+    private fun openPart(p: Part) {
+        exec.execute {
+            try {
+                val ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(p.type) ?: "bin"
+                val f = File(File(cacheDir, "exports").apply { mkdirs() }, "mms_${p.id}.$ext")
+                contentResolver.openInputStream(Uri.parse("content://mms/part/${p.id}"))?.use { i -> f.outputStream().use { i.copyTo(it) } }
+                val uri = FileProvider.getUriForFile(this, "com.bigdatasoup.smsstamp.files", f)
+                runOnUiThread {
+                    try { startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, p.type).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)) }
+                    catch (e: Exception) { Toast.makeText(this, "No app can open ${p.type}", Toast.LENGTH_SHORT).show() }
+                }
+            } catch (e: Exception) { runOnUiThread { Toast.makeText(this, "Could not open attachment", Toast.LENGTH_SHORT).show() } }
+        }
+    }
+
+    private val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+        override fun onChange(selfChange: Boolean) { list.removeCallbacks(refresh); list.postDelayed(refresh, 300) }
+    }
+    private val refresh = Runnable { reload(!list.canScrollVertically(1)) }
+
+    override fun onStart() { super.onStart(); contentResolver.registerContentObserver(Uri.parse("content://mms-sms/"), true, observer) }
+    override fun onStop() { super.onStop(); contentResolver.unregisterContentObserver(observer) }
 
     private fun reload(toEnd: Boolean) {
         exec.execute {
@@ -160,6 +246,7 @@ class ConversationActivity : AppCompatActivity() {
         var items: List<Msg> = emptyList(); var query = ""; var current = -1
         inner class VH(v: View) : RecyclerView.ViewHolder(v) {
             val row: LinearLayout = v.findViewById(R.id.row); val stamp: TextView = v.findViewById(R.id.stamp); val body: TextView = v.findViewById(R.id.body)
+            val media: LinearLayout = v.findViewById(R.id.media)
         }
         override fun onCreateViewHolder(p: ViewGroup, t: Int) = VH(LayoutInflater.from(p.context).inflate(R.layout.item_message, p, false))
         override fun getItemCount() = items.size
@@ -168,6 +255,22 @@ class ConversationActivity : AppCompatActivity() {
             h.row.gravity = if (m.outgoing) Gravity.END else Gravity.START
             h.body.setBackgroundResource(if (m.outgoing) R.drawable.bubble_out else R.drawable.bubble_in)
             h.body.text = highlight(m.body, i == current)
+            h.body.visibility = if (m.body.isEmpty() && m.media.isNotEmpty()) View.GONE else View.VISIBLE
+            h.media.removeAllViews()
+            h.media.visibility = if (m.media.isEmpty()) View.GONE else View.VISIBLE
+            val dp = resources.displayMetrics.density
+            for (p in m.media) {
+                val v: View = if (p.type.startsWith("image/")) ImageView(this@ConversationActivity).apply {
+                    adjustViewBounds = true; maxWidth = (240 * dp).toInt(); maxHeight = (320 * dp).toInt()
+                    minimumWidth = (120 * dp).toInt(); minimumHeight = (90 * dp).toInt(); setBackgroundColor(0x22000000)
+                    loadThumb(this, p.id)
+                } else TextView(this@ConversationActivity).apply {
+                    text = "\uD83D\uDCCE ${p.name} (${p.type})"; setPadding((10 * dp).toInt(), (10 * dp).toInt(), (10 * dp).toInt(), (10 * dp).toInt())
+                    setBackgroundResource(if (m.outgoing) R.drawable.bubble_out else R.drawable.bubble_in); setTextColor(0xFF202124.toInt())
+                }
+                v.setOnClickListener { openPart(p) }
+                h.media.addView(v, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = (4 * dp).toInt() })
+            }
             h.stamp.visibility = if (showStamps) View.VISIBLE else View.GONE
             h.stamp.text = Fmt.stamp(m)
         }
