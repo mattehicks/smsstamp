@@ -12,8 +12,19 @@ android {
         versionCode = 1
         versionName = "1.0"
     }
+    signingConfigs {
+        create("release") {
+            storeFile = (findProperty("SMSSTAMP_STORE_FILE") as String?)?.let { file(it) }
+            storePassword = findProperty("SMSSTAMP_STORE_PASSWORD") as String?
+            keyAlias = findProperty("SMSSTAMP_KEY_ALIAS") as String?
+            keyPassword = findProperty("SMSSTAMP_KEY_PASSWORD") as String?
+        }
+    }
     buildTypes {
-        release { isMinifyEnabled = false }
+        release {
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
